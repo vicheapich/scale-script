@@ -1,0 +1,48 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach the exe to a GitHub Release on tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Build test_scale.exe
+        run: pyinstaller --onefile --console --clean --name test_scale test_scale.py
+
+      # Smoke test only: lists ports on the CI runner (no scale attached).
+      - name: Smoke test
+        run: |
+          dist\test_scale.exe --help
+          dist\test_scale.exe --list
+        shell: cmd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test_scale-windows
+          path: dist/test_scale.exe
+          if-no-files-found: error
+
+      - name: Attach exe to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/test_scale.exe --title "${{ github.ref_name }}" --generate-notes
+        shell: bash

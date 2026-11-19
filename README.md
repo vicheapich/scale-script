@@ -131,7 +131,23 @@ Weight: 1.25 kg
 PyInstaller packs the script and Python into one file. It **cannot
 cross-compile**, so build on the same OS (and CPU type) as the test machine.
 
-**Windows `.exe`** (on any Windows PC that has Python installed):
+**Windows `.exe` – download a ready build (no Python needed anywhere)**
+
+GitHub Actions builds `test_scale.exe` on every push to `main`
+(workflow: `.github/workflows/build-windows.yml`).
+
+1. Open the repository on GitHub, go to **Actions → Build Windows exe**, and open the latest green run.
+2. Under **Artifacts**, download **test_scale-windows**. It downloads as a `.zip`; extract `test_scale.exe` from it.
+   (You need to be signed in to GitHub to download artifacts. They are kept for 90 days.)
+
+To publish a permanent download, push a version tag. The exe will then be attached to a GitHub **Release**:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+**Windows `.exe` – build it yourself** (on any Windows PC that has Python installed):
 
 ```bat
 build_windows.bat
