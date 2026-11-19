@@ -300,7 +300,76 @@ def report(args, state, value, unit, stable, raw, text):
             print(f"  RX: {raw!r}")
         print(f"[{now_stamp()}] ITEM  {text}")
         state["loaded"] = True
+        if args.webhook:
+            if "OUT OF RANGE" in text or w < 0:
+                print("  Not offered for sending: weight is out of range / negative.")
+            else:
+                state["pending_send"] = (value, unit)  # handled in run()
     state["started"] = True
+
+
+def webhook_flow(args, state, value, unit):
+    """Ask the operator for a tracking number, confirm, sign and POST.
+
+    Only called for a stable, non-zero weight event. Nothing is sent
+    without an explicit 'y' from the operator.
+    """
+    import webhook
+
+    sent = state.setdefault("sent", {})  # tracking -> "2.70 kg at 13:14:12"
+    default = state.pop("preset_tracking", "")
+    print(f"\n  --- Send {value} {unit} to the webhook? ---")
+    try:
+        while True:
+            hint = f" [{default}]" if default else ""
+            entered = input(f"  Tracking number (MAILITM_FID){hint}, Enter = skip: ").strip()
+            tracking = webhook.normalize_tracking(entered or default)
+            default = ""
+            if not tracking:
+                print("  Skipped - nothing sent.\n")
+                return
+            if webhook.S10_RE.match(tracking):
+                break
+            print(f"  '{tracking}' is not a valid tracking number "
+                  "(2 letters + 9 digits + 2 letters, e.g. EE123456789KH).")
+
+        if not webhook.s10_check_digit_ok(tracking):
+            print("  WARNING: the check digit does not match - possible typo.")
+        try:
+            payload = webhook.build_payload(tracking, value, unit)
+        except ValueError as e:
+            print(f"  Cannot send: {e}\n")
+            return
+
+        body = webhook.php_json_encode(payload).decode("ascii")
+        print(f"  POST {args.webhook_config.url}")
+        print(f"  Body: {body}")
+        if tracking in sent:
+            print(f"  WARNING: {tracking} was already sent successfully ({sent[tracking]}).")
+            answer = input("  Send it AGAIN? Type 'again' to confirm: ").strip().lower()
+            confirmed = answer == "again"
+        else:
+            confirmed = input("  Send now? [y/N]: ").strip().lower() in ("y", "yes")
+    except EOFError:
+        confirmed = False
+    if not confirmed:
+        print("  Cancelled - nothing sent.\n")
+        return
+    if args.webhook_dry_run:
+        print("  DRY RUN - request NOT sent.\n")
+        return
+
+    print("  Sending...")
+    result = webhook.send(args.webhook_config, payload)
+    status = f"HTTP {result.status}" if result.status else "no HTTP response"
+    if result.ok:
+        print(f"  SUCCESS ({status}): {result.message}")
+        sent[tracking] = f"{value} {unit} at {now_stamp()}"
+    else:
+        print(f"  FAILED ({status}): {result.message}")
+    if result.body:
+        print(f"  Response: {result.body}")
+    print()
 
 
 def continuous_cycle(ser, args, state):
@@ -334,7 +403,7 @@ def continuous_cycle(ser, args, state):
 
 def run(args):
     ser = None
-    state = {"timeouts": 0}
+    state = {"timeouts": 0, "preset_tracking": getattr(args, "tracking", "")}
     try:
         while True:
             # (Re)connect
@@ -386,6 +455,11 @@ def run(args):
                 time.sleep(args.retry)
                 continue
 
+            pending = state.pop("pending_send", None)
+            if pending:
+                webhook_flow(args, state, *pending)
+                ser.reset_input_buffer()  # drop readings that queued up during the prompt
+
             if args.once and (args.mode == "sics" or "last_key" in state):
                 return 0 if ok else 1
 
@@ -434,11 +508,33 @@ def main():
                         help="Event mode: readings at or below this (in display units) count "
                              "as 'empty' (default 0).")
     parser.add_argument("--once", action="store_true", help="Read one weight and exit.")
+    parser.add_argument("-w", "--webhook", action="store_true",
+                        help="After each stable item weight, offer to POST it to WEBHOOK_URL "
+                             "(settings in .env). Nothing is sent without confirmation.")
+    parser.add_argument("--webhook-dry-run", action="store_true",
+                        help="Like --webhook, but only show the request - never send it.")
+    parser.add_argument("--tracking", default="",
+                        help="Tracking number (MAILITM_FID) to pre-fill for the first item.")
     parser.add_argument("--no-raw", action="store_true", help="Hide raw TX/RX debug lines.")
     args = parser.parse_args()
     args.command = args.command.strip().upper()  # SICS commands must be upper-case
     if args.once:
         args.all = True  # --once just prints the first reading
+
+    args.webhook = args.webhook or args.webhook_dry_run
+    if args.webhook:
+        if args.all or args.once:
+            print("--webhook works with item events only; do not combine it with --all / --once.")
+            return 2
+        import webhook
+        try:
+            args.webhook_config = webhook.WebhookConfig.from_env()
+        except ValueError as e:
+            print(f"Webhook configuration error: {e}")
+            print("Copy .env.example to .env (next to the script/exe) and fill it in.")
+            return 2
+        mode = "DRY RUN (nothing is sent)" if args.webhook_dry_run else "ON (asks before sending)"
+        print(f"Webhook {mode}: {args.webhook_config.url}\n")
 
     if args.list:
         ports = list_serial_ports()

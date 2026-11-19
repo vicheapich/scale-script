@@ -186,6 +186,58 @@ Notes:
 
 ---
 
+## 3c. Sending the weight to the Laravel webhook (optional)
+
+The webhook is off by default. With `--webhook`, the script asks after each stable item weight:
+
+1. Scan or type the tracking number (`MAILITM_FID`, e.g. `EE123456785KH`), or press Enter to skip.
+2. Check the JSON body that is shown, then answer `y` to send.
+3. The script shows the HTTP status and the API's response.
+
+It reports **SUCCESS** only when the response is HTTP 2xx **and** the JSON contains `"success": true`.
+If you send the same tracking number again in one session, you must type `again`.
+
+**Setup:** copy `.env.example` to `.env`, next to `test_scale.py` or `test_scale.exe`:
+
+```env
+WEBHOOK_URL=https://dev.cambodiapost.com.kh/api/webhook/notify
+WEBHOOK_SECRET=<same value as Laravel IPS_SIGN_SECRET>
+WEBHOOK_TIMEOUT=10
+```
+
+`.env` is git-ignored, and the secret is never printed.
+
+```bash
+python test_scale.py --port COM4 --mode continuous --webhook-dry-run   # shows the request, never sends
+python test_scale.py --port COM4 --mode continuous --webhook           # asks, then sends
+```
+
+**Request**
+
+```
+POST <WEBHOOK_URL>
+Content-Type: application/json
+Accept: application/json
+signature: <lower-case hex HMAC-SHA256>
+
+[{"MAILITM_FID":"EE123456785KH","WEIGHT":2.35,"WEIGHT_UNIT":"kg","SOURCE":"METTLER_TOLEDO_IND231"}]
+```
+
+**Signature** (matches Laravel `App\Http\Middleware\ValidateIPS`):
+Laravel computes `hash_hmac('sha256', json_encode(json_decode($body, true)), IPS_SIGN_SECRET)`.
+In other words, it signs PHP's *re-encoded* JSON, not the raw bytes. `webhook.py` therefore produces the body in
+PHP `json_encode` format (compact, `/` escaped as `\/`). That makes the signed bytes, the sent bytes and PHP's re-encoding identical.
+The secret is used as **literal text**, not hex-decoded.
+A test runs the real PHP expression to confirm this.
+
+**Tests** (offline, with no scale and no real server):
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+---
+
 ## 4. Protocol summary (manual Appendix B.5)
 
 Commands are upper-case ASCII and end with `CR LF`. The script sends `S\r\n`.
