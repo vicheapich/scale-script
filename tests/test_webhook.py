@@ -100,6 +100,45 @@ class ConfigTests(unittest.TestCase):
             webhook.WebhookConfig.from_env({"WEBHOOK_URL": "", "WEBHOOK_SECRET": ""})
         self.assertIn("WEBHOOK_SECRET", str(cm.exception))
 
+    def test_get_method_needs_no_secret(self):
+        cfg = webhook.WebhookConfig.from_env({"WEBHOOK_URL": "http://localhost:8000/x",
+                                              "WEBHOOK_METHOD": "get"})
+        self.assertEqual((cfg.method, cfg.secret), ("GET", ""))
+        self.assertEqual(webhook.WebhookConfig.from_env(
+            {"WEBHOOK_URL": "http://x", "WEBHOOK_SECRET": "s"}).method, "POST")
+        with self.assertRaises(ValueError) as cm:
+            webhook.WebhookConfig.from_env({"WEBHOOK_URL": "http://x", "WEBHOOK_METHOD": "PUT"})
+        self.assertIn("WEBHOOK_METHOD", str(cm.exception))
+
+
+class QueryTests(unittest.TestCase):
+    def test_query_url(self):
+        q = webhook.build_query("12.345", "kg")
+        self.assertEqual(q, {"weight": 12.345, "unit": "kg"})
+        self.assertEqual(webhook.query_url("http://localhost:8000/api/webhook/scale/mettler", q),
+                         "http://localhost:8000/api/webhook/scale/mettler?weight=12.345&unit=kg")
+        self.assertEqual(webhook.query_url("http://x/a?k=1", webhook.build_query("2700", "g")),
+                         "http://x/a?k=1&weight=2700&unit=g")
+        with self.assertRaises(ValueError):
+            webhook.build_query("0", "kg")
+
+    def test_get_request(self):
+        seen = {}
+
+        def fake(req, timeout):
+            seen["req"] = req
+            return FakeResponse(200, b'{"code":200,"success":true,"message":"Scale data received"}')
+
+        cfg = webhook.WebhookConfig("http://x/api/webhook/scale/mettler", "", 3, "GET")
+        r = webhook.send(cfg, webhook.build_query("12.345", "kg"), opener=fake)
+        self.assertTrue(r.ok)
+        self.assertEqual(r.message, "Scale data received")
+        req = seen["req"]
+        self.assertEqual(req.get_method(), "GET")
+        self.assertEqual(req.full_url, "http://x/api/webhook/scale/mettler?weight=12.345&unit=kg")
+        self.assertIsNone(req.data)
+        self.assertIsNone(req.get_header("Signature"))
+
 
 class FakeResponse(io.BytesIO):
     def __init__(self, status, body):

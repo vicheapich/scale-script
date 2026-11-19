@@ -240,6 +240,16 @@ signature: <lower-case hex HMAC-SHA256>
 [{"MAILITM_FID":"EE123456785KH","WEIGHT":2.35,"WEIGHT_UNIT":"kg","SOURCE":"METTLER_TOLEDO_IND231"}]
 ```
 
+**Weight only (GET)**: set `WEBHOOK_METHOD=GET` in `.env` to send just the weight as a query string,
+with no tracking number and no signature (`WEBHOOK_SECRET` is not needed):
+
+```
+GET <WEBHOOK_URL>?weight=2.7&unit=kg
+```
+
+With `--auto-send` there is no scan in this mode. Each parcel is sent once when its weight is stable,
+and the next parcel is sent only after the scale reads empty. The unit is the one shown on the terminal (`kg` or `g`).
+
 **Signature** (matches Laravel `App\Http\Middleware\ValidateIPS`):
 Laravel computes `hash_hmac('sha256', json_encode(json_decode($body, true)), IPS_SIGN_SECRET)`.
 In other words, it signs PHP's *re-encoded* JSON, not the raw bytes. `webhook.py` therefore produces the body in
@@ -252,6 +262,29 @@ A test runs the real PHP expression to confirm this.
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+---
+
+## 3d. Writing the weight into Excel (Windows)
+
+With `--excel`, each parcel's weight is written into the **selected cell** of the workbook that is open in Excel.
+The cell below is then selected, so the parcels fill one column row by row. No webhook is needed.
+
+```bash
+python test_scale.py --port COM3 --mode continuous --excel
+```
+
+1. Open your workbook in Excel and click the first cell of the weight column.
+2. Put a parcel on the scale. When the weight is stable it is written as a number (for example `2.7`, or `2700` in grams), and the next row is selected.
+3. Every new stable weight is written, even if the scale is not emptied in between (adding or swapping parcels).
+   Readings while the weight is moving, the same unchanged weight, and `0` (empty) are not written.
+   If the reading of one parcel shifts slightly (for example 2700 → 2690), that is a new stable weight and gets its own row.
+   Raise `--settle` (default 5 readings, about 0.25 s) to make that less likely.
+
+The value is written through Excel's COM interface (`pywin32`), not typed as keystrokes, so it always goes into Excel's
+selected cell even if another window has the focus. If Excel is not running, or a cell is still being edited, the script
+prints `NOT written to Excel` and shows the weight so you can type it in. Press Enter or Esc in Excel to finish editing a cell.
+The unit is not written. It is whatever the terminal displays.
 
 ---
 
@@ -301,4 +334,5 @@ About 20 frames per second: `STX SWA SWB SWC WWWWWW TTTTTT CR [CHK]`
 | Port disappears | USB unplugged. The script retries every `--retry` seconds until Ctrl+C. |
 | `*** The terminal is sending Toledo Continuous frames ***` | The port is in Continuous mode. The script switches to listening automatically. Next time, use `--mode continuous`, or set `F4.x.1` to SICS. Check the display unit, because the `S` that was sent may have switched it. |
 | Display unit keeps changing between kg and g | Something is sending `S` while the port is in Continuous mode. Use `--mode continuous`. |
+| Each webhook send takes 2 s longer than it should (Windows) | `WEBHOOK_URL` uses `localhost`. Windows tries IPv6 `::1` first, and `php artisan serve` only listens on IPv4, so the refused connection is retried for about 2 s. Use `http://127.0.0.1:8000/...` instead. |
 | Port list shows "Intel(R) Active Management Technology – SOL" | That is a PC management port, not the scale. Choose the USB-Serial or Prolific port. |

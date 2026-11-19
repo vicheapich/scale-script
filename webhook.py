@@ -3,6 +3,9 @@ Send a scale weight to the Laravel webhook (POST /api/webhook/notify).
 
 Standard library only (no extra dependencies).
 
+WEBHOOK_METHOD=GET instead sends only the weight as a query string, e.g.
+GET <WEBHOOK_URL>?weight=12.345&unit=kg (no tracking number, no signature).
+
 Signature - matches the Laravel middleware App\\Http\\Middleware\\ValidateIPS:
 
     hash_hmac('sha256', json_encode(json_decode($request->getContent(), true)), $secret)
@@ -22,6 +25,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 SOURCE = "METTLER_TOLEDO_IND231"
@@ -62,29 +66,33 @@ def load_env(paths=None):
                     val = val[1:-1]
                 values.setdefault(key, val)
         break  # first .env found wins
-    for key in ("WEBHOOK_URL", "WEBHOOK_SECRET", "WEBHOOK_TIMEOUT"):
+    for key in ("WEBHOOK_URL", "WEBHOOK_SECRET", "WEBHOOK_TIMEOUT", "WEBHOOK_METHOD"):
         if os.environ.get(key):
             values[key] = os.environ[key]
     return values
 
 
 class WebhookConfig:
-    def __init__(self, url, secret, timeout=10.0):
+    def __init__(self, url, secret, timeout=10.0, method="POST"):
         self.url = url
         self.secret = secret
         self.timeout = timeout
+        self.method = method    # POST = signed JSON body, GET = ?weight=&unit= only
 
     @classmethod
     def from_env(cls, values=None):
         values = load_env() if values is None else values
         url = (values.get("WEBHOOK_URL") or "").strip()
         secret = values.get("WEBHOOK_SECRET") or ""
+        method = (values.get("WEBHOOK_METHOD") or "POST").strip().upper()
         errors = []
         if not url:
             errors.append("WEBHOOK_URL is not set")
         elif not url.lower().startswith(("https://", "http://")):
             errors.append("WEBHOOK_URL must start with https://")
-        if not secret:
+        if method not in ("POST", "GET"):
+            errors.append("WEBHOOK_METHOD must be POST or GET")
+        elif method == "POST" and not secret:
             errors.append("WEBHOOK_SECRET is not set")
         try:
             timeout = float(values.get("WEBHOOK_TIMEOUT") or 10)
@@ -95,7 +103,7 @@ class WebhookConfig:
             timeout = 10.0
         if errors:
             raise ValueError("; ".join(errors))
-        return cls(url, secret, timeout)
+        return cls(url, secret, timeout, method)
 
 
 # ------------------------------------------------------------ payload ---
@@ -139,6 +147,16 @@ def build_payload(tracking, weight, unit):
     }]
 
 
+def build_query(weight, unit):
+    """GET mode: only the weight, e.g. {"weight": 12.345, "unit": "kg"}."""
+    return {"weight": validate_weight(weight, unit), "unit": unit}
+
+
+def query_url(url, query):
+    """Append the query to the URL, e.g. ...?weight=12.345&unit=kg"""
+    return url + ("&" if "?" in url else "?") + urllib.parse.urlencode(query)
+
+
 def php_json_encode(obj):
     """Bytes identical to PHP json_encode($obj) with default flags."""
     text = json.dumps(obj, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
@@ -170,19 +188,26 @@ class SendResult:
 
 
 def send(config, payload, opener=None):
-    """POST the payload. Never raises; returns a SendResult."""
-    body = php_json_encode(payload)
-    request = urllib.request.Request(
-        config.url,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "signature": sign(body, config.secret),
-            "User-Agent": "scale-test-script",
-        },
-    )
+    """POST the payload (or GET with build_query() output). Never raises; returns a SendResult."""
+    if config.method == "GET":
+        request = urllib.request.Request(
+            query_url(config.url, payload),
+            method="GET",
+            headers={"Accept": "application/json", "User-Agent": "scale-test-script"},
+        )
+    else:
+        body = php_json_encode(payload)
+        request = urllib.request.Request(
+            config.url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "signature": sign(body, config.secret),
+                "User-Agent": "scale-test-script",
+            },
+        )
     urlopen = opener or urllib.request.urlopen
     try:
         with urlopen(request, timeout=config.timeout) as resp:

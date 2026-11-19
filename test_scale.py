@@ -301,14 +301,29 @@ def report(args, state, value, unit, stable, raw, text):
             print(f"  RX: {raw!r}")
         print(f"[{now_stamp()}] ITEM  {text}")
         state["loaded"] = True
+        if args.excel and "OUT OF RANGE" not in text and w > 0:
+            excel_record(args, state, value, unit)
         if args.webhook:
             if "OUT OF RANGE" in text or w < 0:
                 print("  Not offered for sending: weight is out of range / negative.")
-            elif args.auto_send and not state.get("armed"):
+            elif args.auto_send and state.get("need_empty"):
                 print("  Already sent for this parcel - remove it from the scale to continue.")
             else:
                 state["pending_send"] = (value, unit)  # handled in run()
     state["started"] = True
+
+
+def excel_record(args, state, value, unit):
+    """--excel: every new stable weight goes into Excel's selected cell."""
+    import excel_cell
+
+    try:
+        where = excel_cell.write_selected_cell(value)
+    except excel_cell.ExcelError as e:
+        print(f"  NOT written to Excel: {e}")
+        print(f"  Type it in by hand: {value} {unit}")
+        return
+    print(f"  Excel {where} = {excel_cell.to_number(value)} ({unit}); next row selected.")
 
 
 def arm_tracking(args, state):
@@ -360,6 +375,32 @@ def webhook_flow(args, state, value, unit):
     import webhook
 
     sent = state.setdefault("sent", {})  # tracking -> "2.70 kg at 13:14:12"
+    if args.webhook_config.method == "GET":
+        # Weight only (?weight=&unit=): no tracking number, no signature.
+        try:
+            query = webhook.build_query(value, unit)
+        except ValueError as e:
+            print(f"  Cannot send: {e}\n")
+            return
+        if args.auto_send:
+            state["need_empty"] = True  # one send per parcel; it must be removed first
+            print(f"  AUTO-SEND {value} {unit}")
+        else:
+            print(f"\n  --- Send {value} {unit} to the webhook? ---")
+            print(f"  GET {webhook.query_url(args.webhook_config.url, query)}")
+            try:
+                confirmed = input("  Send now? [y/N]: ").strip().lower() in ("y", "yes")
+            except EOFError:
+                confirmed = False
+            if not confirmed:
+                print("  Cancelled - nothing sent.\n")
+                return
+        post_and_show(args, webhook, query, sent, None, value, unit)
+        if args.auto_send:
+            print("  Remove the parcel, then place the next one.")
+        print()
+        return
+
     if args.auto_send:
         # Tracking number was scanned (and confirmed) before the parcel was placed.
         tracking = state.pop("armed")
@@ -417,19 +458,25 @@ def webhook_flow(args, state, value, unit):
 
 
 def post_and_show(args, webhook, payload, sent, tracking, value, unit):
-    """POST (unless dry run) and print the result as it happens."""
+    """POST/GET (unless dry run) and print the result as it happens."""
+    cfg = args.webhook_config
     if args.webhook_dry_run:
-        print(f"  Body: {webhook.php_json_encode(payload).decode('ascii')}")
+        if cfg.method == "GET":
+            print(f"  GET {webhook.query_url(cfg.url, payload)}")
+        else:
+            print(f"  Body: {webhook.php_json_encode(payload).decode('ascii')}")
         print("  DRY RUN - request NOT sent.")
         return
-    print(f"  [{now_stamp()}] Sending to {args.webhook_config.url} ...", flush=True)
+    target = webhook.query_url(cfg.url, payload) if cfg.method == "GET" else cfg.url
+    print(f"  [{now_stamp()}] Sending {cfg.method} {target} ...", flush=True)
     started = time.monotonic()
     result = webhook.send(args.webhook_config, payload)
     took = f"{time.monotonic() - started:.1f} s"
     status = f"HTTP {result.status}" if result.status else "no HTTP response"
     if result.ok:
         print(f"  [{now_stamp()}] SUCCESS ({status}, {took}): {result.message}")
-        sent[tracking] = f"{value} {unit} at {now_stamp()}"
+        if tracking:
+            sent[tracking] = f"{value} {unit} at {now_stamp()}"
     else:
         print(f"  [{now_stamp()}] FAILED ({status}, {took}): {result.message}")
     if result.body:
@@ -490,7 +537,8 @@ def run(args):
                     print("Listening only (Toledo Continuous) - nothing is sent to the scale.\n")
                     ser.reset_input_buffer()
 
-            if args.auto_send and not state.get("armed") and not state.get("need_empty"):
+            if args.auto_send and args.webhook_config.method != "GET" \
+                    and not state.get("armed") and not state.get("need_empty"):
                 if not arm_tracking(args, state):
                     return 0
                 ser.reset_input_buffer()  # readings queued while waiting for the scan
@@ -586,7 +634,13 @@ def main():
     parser.add_argument("--auto-send", action="store_true",
                         help="Scan the tracking number first, then the weight is sent "
                              "automatically as soon as it is stable (one send per scan; "
-                             "the scale must be empty before the next scan). Implies --webhook.")
+                             "the scale must be empty before the next scan). With "
+                             "WEBHOOK_METHOD=GET there is no scan: each parcel is sent once. "
+                             "Implies --webhook.")
+    parser.add_argument("--excel", action="store_true",
+                        help="Windows: write each parcel's weight into the selected cell of "
+                             "the open Excel workbook, then select the cell below. "
+                             "No webhook is needed.")
     parser.add_argument("--tracking", default="",
                         help="Tracking number (MAILITM_FID) to pre-fill for the first item.")
     parser.add_argument("--no-raw", action="store_true", help="Hide raw TX/RX debug lines.")
@@ -594,6 +648,19 @@ def main():
     args.command = args.command.strip().upper()  # SICS commands must be upper-case
     if args.once:
         args.all = True  # --once just prints the first reading
+
+    if args.excel:
+        if args.all or args.once:
+            print("--excel works with item events only; do not combine it with --all / --once.")
+            return 2
+        try:
+            import win32com.client  # noqa: F401
+        except ImportError:
+            print("--excel needs Windows and pywin32:  pip install -r requirements.txt")
+            return 2
+        print("Excel: click the first cell of the weight column in your open workbook.\n"
+              "       Each parcel's weight goes into the selected cell, then the cell "
+              "below is selected.\n")
 
     args.webhook = args.webhook or args.webhook_dry_run or args.auto_send
     if args.webhook:
@@ -613,7 +680,7 @@ def main():
             mode = "AUTO-SEND (sends as soon as the weight is stable)"
         else:
             mode = "ON (asks before sending)"
-        print(f"Webhook {mode}: {args.webhook_config.url}\n")
+        print(f"Webhook {mode}: {args.webhook_config.method} {args.webhook_config.url}\n")
 
     if args.list:
         ports = list_serial_ports()
