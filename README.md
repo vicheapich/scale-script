@@ -1,12 +1,20 @@
 # METTLER TOLEDO IND231 / IND236 – Serial Test Script
 
 A small Python script that checks communication with an IND231/IND236 weighing
-terminal over **USB** (virtual COM port) or **RS-232**, using the **MT-SICS**
-protocol. It only tests communication. There is no API, database or web interface.
+terminal over **USB** (virtual COM port) or **RS-232**. It supports the **MT-SICS**
+protocol (the default) and **Toledo Continuous** output. It only tests communication. There is no API, database or web interface.
 
 Protocol reference: *METTLER TOLEDO IND231/IND236 User's Guide*,
-30094013 R06 (11/2023), **Appendix B.5 – Standard Interface Command Set (SICS)**
-and **Section 3.7 – F4 Communication**.
+30094013 R06 (11/2023), **Appendix B.5 – Standard Interface Command Set (SICS)**,
+**Appendix B.3 – Continuous Output Mode** and **Section 3.7 – F4 Communication**.
+
+> **SICS or Continuous?** Check the terminal's `F4.x.1` Connection Mode.
+> - **SICS**: run the script normally. It sends `S` and reads the reply.
+> - **Toledo Continuous**: run it with `--mode continuous`. The script only listens and sends nothing.
+>   In this mode the terminal treats an `S` character as **"Switch units"** (CTPZ, manual B.4),
+>   so sending `S` would change the display between kg and g.
+>   If the script is started in SICS mode and receives Continuous frames, it warns
+>   you and switches to listen-only mode automatically.
 
 ---
 
@@ -98,6 +106,7 @@ Press **Ctrl+C** to stop.
 | `--parity` | N | `N`, `E` or `O` |
 | `--stopbits` | 1 | 1 or 2 |
 | `--xonxoff` | off | Enable XON/XOFF flow control |
+| `-m, --mode` | sics | `sics` sends a command and reads the reply. `continuous` only listens to Toledo Continuous output and sends nothing. |
 | `-c, --command` | S | SICS command per cycle. `S` = stable weight, `SI` = immediate weight |
 | `-i, --interval` | 0.5 | Seconds between requests |
 | `-t, --timeout` | 5 | Read timeout. `S` can take up to 3 s while the scale settles. |
@@ -190,6 +199,23 @@ The weight field is right-aligned. It has a 10-character sign+number, followed b
 
 ---
 
+### Toledo Continuous (manual Appendix B.3)
+
+About 20 frames per second: `STX SWA SWB SWC WWWWWW TTTTTT CR [CHK]`
+
+| Example frame (captured from a real IND231) | Decoded |
+|---|---|
+| `\x02,0    199   000\r` | 1.99 kg, stable |
+| `\x02,8    037   000\r` | 0.37 kg, motion |
+| `\x02) !  1990    00\r` | 1990 g, stable (unit switched to grams) |
+| `\x02,> ...` | negative, motion, out of range |
+
+- **SWA** bits 0–2 give the decimal point position.
+- **SWB** bit 0 = net, bit 1 = negative, bit 2 = out of range, bit 3 = motion, bit 4 = kg (otherwise lb).
+- **SWC** bits 0–2 give the unit (`001` = g, `011` = oz). Bit 4 = expanded ×10.
+
+---
+
 ## 5. Troubleshooting
 
 | Symptom | Likely cause |
@@ -200,4 +226,6 @@ The weight field is right-aligned. It has a 10-character sign+number, followed b
 | Constant `S I` | Scale is in motion (vibration, draught) or not ready. Try `--command SI`. |
 | `Could not open port` | Wrong name, port in use by another program, or (Windows) driver missing. On macOS, check that the device appears under `/dev/cu.*`. |
 | Port disappears | USB unplugged. The script retries every `--retry` seconds until Ctrl+C. |
-| Data arrives without sending anything | The port is in Auto Print or Toledo Continuous mode. Set it to SICS. |
+| `*** The terminal is sending Toledo Continuous frames ***` | The port is in Continuous mode. The script switches to listening automatically. Next time, use `--mode continuous`, or set `F4.x.1` to SICS. Check the display unit, because the `S` that was sent may have switched it. |
+| Display unit keeps changing between kg and g | Something is sending `S` while the port is in Continuous mode. Use `--mode continuous`. |
+| Port list shows "Intel(R) Active Management Technology – SOL" | That is a PC management port, not the scale. Choose the USB-Serial or Prolific port. |
