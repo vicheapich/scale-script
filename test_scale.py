@@ -209,13 +209,13 @@ def sics_cycle(ser, args, state):
     payload = (args.command + "\r\n").encode("ascii")
     ser.write(payload)
     ser.flush()
-    if not args.no_raw:
+    if args.all and not args.no_raw:
         print(f"  TX: {payload!r}")
 
     # size cap: a SICS reply is a short line; Continuous output fills 200
     # bytes in ~0.1 s, so it is detected quickly instead of after the timeout.
     raw = ser.read_until(b"\n", 200)
-    if not args.no_raw:
+    if STX in raw and not args.no_raw:
         shown = raw if len(raw) <= 120 else raw[:120] + b"..."
         print(f"  RX: {shown!r}")
 
@@ -233,18 +233,74 @@ def sics_cycle(ser, args, state):
         return bool(raw)
 
     state["timeouts"] = 0
-    if not raw.endswith(b"\n"):
-        print("  (partial line received before timeout)")
     kind, data = parse_response(raw.decode("ascii", errors="replace").strip())
     if kind == "weight":
         stable, value, unit = data
-        print(f"Weight: {value} {unit}" + ("" if stable else "  (dynamic)"))
-    elif kind == "status":
-        print(data)
-    else:
-        print(f"Unrecognised response: {data!r}")
+        text = f"Weight: {value} {unit}" + ("" if stable else "  (dynamic)")
+        report(args, state, value, unit, stable, raw, text)
+    elif args.all or kind == "unknown":
+        # In event mode "S I" (scale in motion) is normal and stays quiet.
+        if not args.all and not args.no_raw:
+            print(f"  RX: {raw!r}")
+        if not raw.endswith(b"\n"):
+            print("  (partial line received before timeout)")
+        print(data if kind == "status" else f"Unrecognised response: {data!r}")
     time.sleep(args.interval)
     return True
+
+
+def now_stamp():
+    return time.strftime("%H:%M:%S")
+
+
+def report(args, state, value, unit, stable, raw, text):
+    """Decide what to print for one weight reading.
+
+    --all : print readings (throttled to --interval unless the value changes).
+    default (event mode): print once when an item has settled on the scale,
+    and once when the scale is empty again. Nothing is printed while the
+    weight is moving or unchanged.
+    """
+    if args.all:
+        key = (value, unit, stable)
+        now = time.monotonic()
+        if key == state.get("last_key") and now - state.get("last_print", 0) < args.interval:
+            return
+        state["last_key"], state["last_print"] = key, now
+        if not args.no_raw:
+            print(f"  RX: {raw!r}")
+        print(text)
+        return
+
+    # Event mode: wait for the same stable value on N consecutive readings.
+    key = (value, unit)
+    if not stable:
+        state["candidate"], state["stable_count"] = None, 0
+        return
+    if key != state.get("candidate"):
+        state["candidate"], state["stable_count"] = key, 0
+    state["stable_count"] += 1
+    settle = args.settle or (5 if args.mode == "continuous" else 1)
+    if state["stable_count"] < settle or key == state.get("reported"):
+        return
+    state["reported"] = key
+
+    try:
+        w = float(value)
+    except ValueError:
+        w = 0.0
+    if abs(w) <= args.min_weight:
+        if state.get("loaded"):
+            print(f"[{now_stamp()}] Scale empty ({value} {unit}). Waiting for next item...\n")
+        elif "started" not in state:
+            print(f"[{now_stamp()}] Ready - scale empty ({value} {unit}). Place an item...\n")
+        state["loaded"] = False
+    else:
+        if not args.no_raw:
+            print(f"  RX: {raw!r}")
+        print(f"[{now_stamp()}] ITEM  {text}")
+        state["loaded"] = True
+    state["started"] = True
 
 
 def continuous_cycle(ser, args, state):
@@ -266,20 +322,13 @@ def continuous_cycle(ser, args, state):
         return True
     frame = raw[start + 1:-1]
 
-    # ~20 frames/s: only print every --interval seconds, or when the value changes
     result = parse_continuous(frame)
-    key = None if result is None else (result["weight"], result["unit"], result["motion"])
-    now = time.monotonic()
-    if key == state.get("last_key") and now - state.get("last_print", 0) < args.interval:
-        return True
-    state["last_key"], state["last_print"] = key, now
-
-    if not args.no_raw:
-        print(f"  RX: {raw[start:]!r}")
     if result is None:
-        print(f"Unrecognised frame: {frame!r}")
-    else:
-        print(describe_continuous(result))
+        if args.all:
+            print(f"Unrecognised frame: {frame!r}")
+        return True
+    report(args, state, result["weight"], result["unit"], not result["motion"],
+           raw[start:], describe_continuous(result))
     return True
 
 
@@ -337,7 +386,7 @@ def run(args):
                 time.sleep(args.retry)
                 continue
 
-            if args.once and (ok or args.mode == "sics"):
+            if args.once and (args.mode == "sics" or "last_key" in state):
                 return 0 if ok else 1
 
     except KeyboardInterrupt:
@@ -375,10 +424,21 @@ def main():
     parser.add_argument("-t", "--timeout", type=float, default=5.0,
                         help="Read timeout in seconds (default 5; S may take up to 3 s).")
     parser.add_argument("--retry", type=float, default=3.0, help="Seconds before reconnecting (default 3).")
+    parser.add_argument("-a", "--all", action="store_true",
+                        help="Print every reading (debug). Default: print only when an item "
+                             "settles on the scale and when the scale is empty again.")
+    parser.add_argument("--settle", type=int, default=None,
+                        help="Event mode: identical stable readings needed before reporting "
+                             "(default 5 for continuous = ~0.25 s, 1 for SICS).")
+    parser.add_argument("--min-weight", type=float, default=0.0,
+                        help="Event mode: readings at or below this (in display units) count "
+                             "as 'empty' (default 0).")
     parser.add_argument("--once", action="store_true", help="Read one weight and exit.")
     parser.add_argument("--no-raw", action="store_true", help="Hide raw TX/RX debug lines.")
     args = parser.parse_args()
     args.command = args.command.strip().upper()  # SICS commands must be upper-case
+    if args.once:
+        args.all = True  # --once just prints the first reading
 
     if args.list:
         ports = list_serial_ports()

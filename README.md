@@ -106,6 +106,9 @@ Press **Ctrl+C** to stop.
 | `--parity` | N | `N`, `E` or `O` |
 | `--stopbits` | 1 | 1 or 2 |
 | `--xonxoff` | off | Enable XON/XOFF flow control |
+| `-a, --all` | off | Print every reading, for debugging. **Default (event mode):** print one line when an item settles on the scale, and one when the scale is empty again. |
+| `--settle` | 5 (continuous) / 1 (SICS) | Number of identical stable readings needed before an item is reported |
+| `--min-weight` | 0 | Readings at or below this value, in display units, count as "empty" |
 | `-m, --mode` | sics | `sics` sends a command and reads the reply. `continuous` only listens to Toledo Continuous output and sends nothing. |
 | `-c, --command` | S | SICS command per cycle. `S` = stable weight, `SI` = immediate weight |
 | `-i, --interval` | 0.5 | Seconds between requests |
@@ -116,22 +119,23 @@ Press **Ctrl+C** to stop.
 
 ### Example output
 
+By default the script prints only when something happens: once when an item
+has settled on the scale, and once when the scale is empty again.
+
 ```text
-Available ports:
-1. /dev/cu.usbserial-110
-
-Use /dev/cu.usbserial-110? [Y/n]:
-
-Connecting to scale on /dev/cu.usbserial-110 (9600 8N1, xonxoff=off)...
+Connecting to scale on COM4 (9600 8N1, xonxoff=off, mode=continuous)...
 Connected successfully!
 
-  TX: b'S\r\n'
-  RX: b'S S         0.00 kg\r\n'
-Weight: 0.00 kg
-  TX: b'S\r\n'
-  RX: b'S S         1.25 kg\r\n'
-Weight: 1.25 kg
+Listening only (Toledo Continuous) - nothing is sent to the scale.
+
+[13:14:07] Ready - scale empty (0.00 kg). Place an item...
+
+  RX: b'\x02,0    270   000\r'
+[13:14:12] ITEM  Weight: 2.70 kg
+[13:14:20] Scale empty (0.00 kg). Waiting for next item...
 ```
+
+Add `--all` to see every reading, together with the raw `TX:` and `RX:` bytes.
 
 ---
 
