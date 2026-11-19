@@ -212,6 +212,23 @@ python test_scale.py --port COM4 --mode continuous --webhook-dry-run   # shows t
 python test_scale.py --port COM4 --mode continuous --webhook           # asks, then sends
 ```
 
+**Auto-send** (sends as soon as the weight is stable, with no question):
+
+```bat
+test_scale.exe --port COM3 --mode continuous --auto-send
+```
+
+1. The scale is empty. Scan the tracking number.
+2. Put the parcel on the scale.
+3. When the weight is stable, the script sends it immediately and shows the result live:
+   `SUCCESS (HTTP 200, 0.3 s)` or `FAILED ...`.
+4. Remove the parcel. The next scan is accepted only after the scale reads empty.
+   This prevents one parcel's weight from being sent under another tracking number.
+
+Each scan sends exactly one weight. Readings taken while the weight is still changing are never sent.
+A tracking number that was already sent in this session, or one with a wrong check digit, needs confirmation.
+`--auto-send --webhook-dry-run` runs the same workflow without sending anything.
+
 **Request**
 
 ```
